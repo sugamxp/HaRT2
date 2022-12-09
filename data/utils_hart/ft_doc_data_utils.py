@@ -4,6 +4,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import URL
 from transformers import BatchEncoding
+import pickle5 as pickle
 
 user_id_column = 'user_id'
 message_column = 'message'
@@ -75,7 +76,9 @@ def get_data_from_csv(logger, csv_file, fields, data_type):
 
 def get_data_from_pkl(logger, pkl_file, fields, data_type):
     logger.info("Getting data from {} data pickle file:{}".format(data_type, pkl_file))
-    data = pd.read_pickle(pkl_file)
+    data = None
+    with open(pkl_file, "rb") as fh:
+      data = pickle.load(fh)    
     data.sort_values(by=fields['order_by_fields'], inplace=True)
     data.reset_index(drop=True, inplace=True)
     return data
@@ -113,12 +116,14 @@ def tokenize_with_labels(data, label_field, tokenizer, data_args):
             be['labels'][-2] = int(data[label_field]) + 1
         elif not math.isnan(data[label_field]):
             be['labels'][-2] = int(data[label_field])
+            
         return be
 
     data['tokenized'] = data.apply(process, axis=1)
 
 def normalize_and_concat(data):
     normalized = pd.json_normalize(data['tokenized'])
+    # print(data['tokenized'][0])
     data = pd.concat([data, normalized], axis=1)
     return data.groupby(user_id_column).agg({'input_ids': 'sum', 'attention_mask':'sum', 'labels':'sum'}).reset_index()
 
@@ -148,6 +153,7 @@ def pad_and_chunk(data, tokenizer, block_size):
 def transform_data(logger, tokenizer, data, fields, block_size, data_args):
     start_time = time.time()
     data_new = data[fields['transform_data_fields']].copy()
+    # print(data_new.head())
     append_insep(data_new, tokenizer)
     tokenize_with_labels(data_new, fields['label_field'], tokenizer, data_args)
     data_new = normalize_and_concat(data_new)
@@ -157,10 +163,12 @@ def transform_data(logger, tokenizer, data, fields, block_size, data_args):
     
 def group_data(data, max_blocks, logger):
     batch = pd.DataFrame(data.batch_encodings.tolist())
+    # print('batch shape', batch.shape, batch.columns)
     actual_blocks = len(batch.columns)
     logger.info('************** Total Number of blocks = {} *************'.format(len(batch.columns)))
     if max_blocks is not None and len(batch.columns) > max_blocks:
         batch = batch[range(max_blocks)]
+        # print('batch shape', batch.shape)
         logger.info('************ Trimmed Number of blocks = {} *************'.format(len(batch.columns)))
     return batch.to_numpy().tolist(), actual_blocks
 
@@ -176,6 +184,7 @@ def load_dataset(logger, tokenizer, table, block_size, max_blocks, data_args, da
         map_labels_to_int_value(data, fields['label_field'])
     data = transform_data(logger, tokenizer, data, fields, block_size, data_args)
     logger.info('************** Block size = {} *************'.format(block_size))
+    # print('==> disable_hulm_batching', disable_hulm_batching, max_blocks)
     if not disable_hulm_batching:
         return group_data(data, max_blocks, logger) 
     else:
