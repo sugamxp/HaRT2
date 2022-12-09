@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 import torch.nn as nn
-
+import collections
 import transformers
 from transformers import (
     AutoConfig,
@@ -151,7 +151,7 @@ def main():
                 f"Output directory ({training_args.output_dir}) already exists and is not empty. "
                 "Use --overwrite_output_dir to overcome."
             )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+        elif last_checkpoint is not None:
             logger.info(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
@@ -228,6 +228,7 @@ def main():
             use_auth_token=True if model_args.use_auth_token else None,
         )
         config.use_history_output=data_args.use_history_output
+        print('==> model_args', model_args)
         tokenizer = AutoTokenizer.from_pretrained(
             model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
@@ -239,7 +240,7 @@ def main():
     config.pad_token_id = tokenizer.eos_token_id
     config.freeze_model = model_args.freeze_model
     config.use_hart_no_hist = model_args.use_hart_no_hist
-    
+    print('==> model_args.load_non_PT_hulm_model', model_args.load_non_PT_hulm_model)
     if training_args.do_train and not model_args.load_non_PT_hulm_model:
         model = HaRTForSequenceClassification(config, model_args.model_name_or_path)
     elif training_args.do_train and model_args.load_non_PT_hulm_model:
@@ -248,7 +249,7 @@ def main():
         hart = HaRTPreTrainedModel(config, hartbaseLMModel)
         model = HaRTForSequenceClassification(config, pt_model=hart)
     elif training_args.do_eval and not training_args.do_train:
-        model = HaRTForSequenceClassification.from_pretrained(model_args.model_name_or_path)
+        model = HaRTForSequenceClassification.from_pretrained(model_args.model_name_or_path, config=config)
     else:
         raise ValueError("You're neither training nor evaluating. Can't pick a model because I don't know what do you want to do.")
 
@@ -292,6 +293,7 @@ def main():
         if data_args.train_table is not None:
             args = [logger, tokenizer, data_args.train_table, block_size, data_args.max_train_blocks, data_args, 'train', data_args.disable_hulm_batching]
             train_dataset, train_uncut_blocks = load_dataset(args) 
+            print('==> Training','\n',train_dataset)
         if data_args.dev_table is not None:
             args = [logger, tokenizer, data_args.dev_table, block_size, data_args.max_val_blocks, data_args, 'dev', data_args.disable_hulm_batching]
             eval_dataset, eval_uncut_blocks = load_dataset(args)
@@ -329,8 +331,9 @@ def main():
             indices = p.label_ids!=-100 # make sure to ignore the labels marked as -100
             labels = p.label_ids[indices]
             if not model_args.use_hart_no_hist:
+                preds = preds[:, :, :-1]
                 preds = preds[indices]
-            if data_args.save_preds_labels:
+            if True:
                 np.savetxt(training_args.output_dir +'/preds.txt', preds, fmt='%d')
                 np.savetxt(training_args.output_dir + '/labels.txt', labels, fmt='%d')
             precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='weighted')
@@ -401,6 +404,7 @@ def main():
             if model_args.add_history:
                 metrics["0s_initial_history"] = False if model_args.initial_history else True
         
+        # print('==>metrics', metrics)
 
         trainer.save_model()  # Saves the tokenizer too for easy upload
 

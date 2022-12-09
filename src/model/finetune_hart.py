@@ -6,6 +6,8 @@ from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
 from .modeling_hart import HaRTBasePreTrainedModel
 from .hart import HaRTPreTrainedModel
+import numpy as np
+from collections import Counter
 
 class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
     # _keys_to_ignore_on_load_missing = [r"h\.\d+\.attn\.masked_bias", r"lm_head\.weight"]
@@ -17,6 +19,9 @@ class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
         self.finetuning_task = config.finetuning_task
         self.use_history_output = config.use_history_output
         self.use_hart_no_hist = config.use_hart_no_hist
+        self.cnt = 0
+        print('==>', self.use_history_output, self.use_hart_no_hist, self.num_labels)
+        print('==> config', config)
         if model_name_or_path:
             self.transformer = HaRTPreTrainedModel.from_pretrained(model_name_or_path)
         elif pt_model:
@@ -25,7 +30,9 @@ class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
             self.transformer = HaRTPreTrainedModel(config)
             self.init_weights()
         
+        #change here
         if not self.freeze_model and not self.finetuning_task=='ope' and not self.finetuning_task=='user':
+            print('==>layer norm called')
             self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
         if self.finetuning_task=='age':
@@ -108,16 +115,19 @@ class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
         all_blocks_last_hidden_states = transformer_outputs.all_blocks_extract_layer_hs if self.freeze_model else transformer_outputs.all_blocks_last_hidden_states 
         
+        # if self.finetuning_task == 'stance' or self.finetuning_task=='user' or self.finetuning_task=='ope' or self.finetuning_task=='age'#:
         if self.finetuning_task=='user' or self.finetuning_task=='ope' or self.finetuning_task=='age':
+            # print('==> self.finetuning_task', self.finetuning_task)
             if self.use_history_output:
                 states = transformer_outputs.history[0]
                 masks = transformer_outputs.history[1]
                 multiplied = tuple(l * r for l, r in zip(states, masks))
                 all_blocks_user_states = torch.stack(multiplied, dim=1)
                 all_blocks_masks = torch.stack(masks, dim=1)
+                print('==> all_blocks_user_states', all_blocks_user_states.shape)
+                print('==> all_blocks_masks', all_blocks_masks.shape)
                 sum = torch.sum(all_blocks_user_states, dim=1)
                 divisor = torch.sum(all_blocks_masks, dim=1)
                 hidden_states = sum/divisor
@@ -125,7 +135,20 @@ class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
                 raise ValueError("Since you don't want to use the user-states/history output for a user-level task, please customize the code as per your requirements.")
         else:
             hidden_states = torch.stack(all_blocks_last_hidden_states, dim=1)
-       
+            
+        states = transformer_outputs.history[0]
+        masks = transformer_outputs.history[1]
+        multiplied = tuple(l * r for l, r in zip(states, masks))
+        all_blocks_user_states = torch.stack(multiplied, dim=1)
+        
+        print('==>all_blocks_user_states', all_blocks_user_states.shape)
+        print('==>hidden_states', hidden_states.shape)
+        
+        # add user state
+        hidden_states = torch.cat((hidden_states, all_blocks_user_states.unsqueeze(dim=2)), dim=2)
+
+        print('==>hidden_states', hidden_states.shape)
+
         if self.use_hart_no_hist:
             logits = self.score(all_blocks_last_hidden_states[0]) if self.freeze_model else self.score(self.ln_f(all_blocks_last_hidden_states[0]))
             batch_size, _, sequence_length = input_ids.shape
@@ -138,6 +161,7 @@ class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
                 self.score(self.transform(self.ln_f(hidden_states)))
             else:
                 logits = self.score(self.ln_f(hidden_states))
+                # print('==> logits shape', logits.shape)
             pooled_logits = logits if (user_ids is None or self.use_history_output) else \
                         self.get_pooled_logits(logits, input_ids, inputs_embeds)
 
@@ -148,6 +172,20 @@ class HaRTForSequenceClassification(HaRTBasePreTrainedModel):
                 loss_fct = MSELoss()
                 loss = loss_fct(pooled_logits.view(-1), labels.to(self.dtype).view(-1))
             else:
+                
+                #FOR 1.1
+                #label updated
+                np_labels = np.array(labels.cpu())
+                cuda0 = torch.device('cuda:0')
+                mode_labels = torch.tensor(np.apply_along_axis(lambda x: Counter(x).most_common(2)[-1][0]
+                                            if len(Counter(x)) > 1  
+                                            else Counter(x).most_common(1)[-1][0], 
+                                            axis=2, 
+                                            arr=np_labels)).to(cuda0)
+                                                                
+                labels = torch.cat((labels, mode_labels.unsqueeze(dim=2)), dim=2)
+                print("==> labels | logits", labels.shape, pooled_logits.shape)
+                
                 labels = labels.long()
                 loss_fct = CrossEntropyLoss()
                 loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
